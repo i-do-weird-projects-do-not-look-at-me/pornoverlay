@@ -4,14 +4,11 @@ import cv2
 import requests
 import tempfile
 import yt_dlp
-from bs4 import BeautifulSoup
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QPoint
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
-search_term = "" #INSERT SEARCH TERM HERE!!!!!
-
-
+search_term = input("What category of porn do you desire?  ")
 download_index = 2
 next_video_path = None
 
@@ -118,6 +115,27 @@ class VideoPlayer(QWidget):
                 # Move window to the nearest corner
                 self.move(nearest_corner)
 
+    def keyPressEvent(self, event):
+        if event.modifiers() == Qt.ShiftModifier and event.key() == Qt.Key_N:
+            self.skip_current_video_and_delete_next()
+
+    def skip_current_video_and_delete_next(self):
+        global next_video_path
+        # Delete the next video if it exists
+        if next_video_path and os.path.exists(next_video_path):
+            os.remove(next_video_path)
+            print(f"Next video deleted: {next_video_path}")
+
+        # Delete the current video if it exists
+        if os.path.exists(self.thread.video_path):
+            os.remove(self.thread.video_path)
+            print(f"Current video deleted: {self.thread.video_path}")
+
+        # Pre-download next video
+        self.pre_download_next_video()
+
+        # Skip to next video (simulate video end)
+        self.play_next_video()
 
     def pre_download_next_video(self):
         global next_video_path, download_index
@@ -129,15 +147,15 @@ class VideoPlayer(QWidget):
     def play_next_video(self):
         global next_video_path
         if next_video_path:
-            os.remove(self.thread.video_path)
-            self.thread = VideoThread(next_video_path)
+            os.remove(self.thread.video_path)  # Clean up current video
+            self.thread = VideoThread(next_video_path)  # Start the next video
             self.thread.change_frame.connect(self.update_image)
             self.thread.halfway_signal.connect(self.pre_download_next_video)
             self.thread.finished.connect(self.play_next_video)
             self.thread.start()
 
 def fetch_video_url(search_term):
-    api_url = f"https://www.pornhub.com/webmasters/search?search={search_term}&segment=gay"
+    api_url = f"https://www.pornhub.com/webmasters/search?search={search_term}"
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(api_url, headers=headers)
     if response.status_code != 200:
@@ -149,7 +167,13 @@ def fetch_video_url(search_term):
 
 def download_video(video_url):
     save_path = os.path.join(os.getcwd(), f"video_{download_index}.mp4")
-    ydl_opts = {'outtmpl': save_path, 'quiet': True, 'no_warnings': True, 'format': 'best'}
+
+    # If video with same name exists, delete it
+    if os.path.exists(save_path):
+        os.remove(save_path)
+        print(f"Deleted existing video: {save_path}")
+
+    ydl_opts = {'outtmpl': save_path, 'quiet': True, 'no_warnings': True, 'format': 'worst.2'}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([video_url])
     return save_path
