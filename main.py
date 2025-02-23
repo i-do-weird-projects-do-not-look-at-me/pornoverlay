@@ -2,19 +2,25 @@ import sys
 import os
 import cv2
 import requests
-import tempfile
 import yt_dlp
+import threading
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QPoint
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 search_term = input("What category of porn do you desire?  ")
-download_index = 2
+download_index = 0
 next_video_path = None
+
+global windowSizeRatio, windowOpacity
+windowSizeRatio = 7
+windowOpacity = 75
+
 
 class VideoThread(QThread):
     change_frame = pyqtSignal(QImage)
     halfway_signal = pyqtSignal()
+    finished_signal = pyqtSignal()
 
     def __init__(self, video_path):
         super().__init__()
@@ -23,6 +29,7 @@ class VideoThread(QThread):
 
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30  # Get actual FPS, default to 30 if not found
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         halfway_frame = frame_count // 2
         frame_counter = 0
@@ -42,9 +49,10 @@ class VideoThread(QThread):
             qt_image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
 
             self.change_frame.emit(qt_image)
-            self.msleep(33)
+            self.msleep(int(1000 / fps))  # Adjust sleep time based on FPS
 
         cap.release()
+        self.finished_signal.emit()
 
     def stop(self):
         self._run_flag = False
@@ -56,10 +64,10 @@ class VideoPlayer(QWidget):
         self.setWindowTitle("Video Player")
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setWindowOpacity(0.5)
+        self.setWindowOpacity(windowOpacity/100)
 
         screen = QApplication.primaryScreen().geometry()
-        self.setGeometry(50, 50, screen.width() // 8, screen.height() // 8)
+        self.setGeometry(50, 50, screen.width() // windowSizeRatio, screen.height() // windowSizeRatio)
 
         self.video_label = QLabel(self)
         self.video_label.setAlignment(Qt.AlignCenter)
@@ -73,7 +81,7 @@ class VideoPlayer(QWidget):
         self.thread = VideoThread(video_path)
         self.thread.change_frame.connect(self.update_image)
         self.thread.halfway_signal.connect(self.pre_download_next_video)
-        self.thread.finished.connect(self.play_next_video)
+        self.thread.finished_signal.connect(self.play_next_video)
         self.thread.start()
 
     def update_image(self, image):
@@ -97,49 +105,24 @@ class VideoPlayer(QWidget):
             self.drag_position = None
             if QApplication.keyboardModifiers() == Qt.ControlModifier:
                 screen = QApplication.primaryScreen().geometry()
-
-                # Get the current position of the window
-                window_pos = self.pos()
-
-                # Define the four corners
+                window_size = self.frameGeometry()
                 corners = [
-                    QPoint(0, 0),  # Top-left corner
-                    QPoint(screen.width() - self.width(), 0),  # Top-right corner
-                    QPoint(0, screen.height() - self.height()),  # Bottom-left corner
-                    QPoint(screen.width() - self.width(), screen.height() - self.height())  # Bottom-right corner
+                    QPoint(0, 0),
+                    QPoint(screen.width() - window_size.width(), 0),
+                    QPoint(0, screen.height() - window_size.height()),
+                    QPoint(screen.width() - window_size.width(), screen.height() - window_size.height())
                 ]
-
-                # Find the nearest corner
-                nearest_corner = min(corners, key=lambda corner: (corner - window_pos).manhattanLength())
-
-                # Move window to the nearest corner
+                nearest_corner = min(corners, key=lambda corner: (corner - self.pos()).manhattanLength())
                 self.move(nearest_corner)
-
-    def keyPressEvent(self, event):
-        if event.modifiers() == Qt.ShiftModifier and event.key() == Qt.Key_N:
-            self.skip_current_video_and_delete_next()
-
-    def skip_current_video_and_delete_next(self):
-        global next_video_path
-        # Delete the next video if it exists
-        if next_video_path and os.path.exists(next_video_path):
-            os.remove(next_video_path)
-            print(f"Next video deleted: {next_video_path}")
-
-        # Delete the current video if it exists
-        if os.path.exists(self.thread.video_path):
-            os.remove(self.thread.video_path)
-            print(f"Current video deleted: {self.thread.video_path}")
-
-        # Pre-download next video
-        self.pre_download_next_video()
-
-        # Skip to next video (simulate video end)
-        self.play_next_video()
 
     def pre_download_next_video(self):
         global next_video_path, download_index
-        download_index += 1
+        if next_video_path is None:
+            download_index += 1
+            threading.Thread(target=self.download_next_video, daemon=True).start()
+
+    def download_next_video(self):
+        global next_video_path
         video_url = fetch_video_url(search_term)
         next_video_path = download_video(video_url)
         print(f"Pre-downloaded next video to: {next_video_path}")
@@ -147,12 +130,13 @@ class VideoPlayer(QWidget):
     def play_next_video(self):
         global next_video_path
         if next_video_path:
-            os.remove(self.thread.video_path)  # Clean up current video
-            self.thread = VideoThread(next_video_path)  # Start the next video
+            os.remove(self.thread.video_path)  # Remove current video
+            self.thread = VideoThread(next_video_path)
             self.thread.change_frame.connect(self.update_image)
             self.thread.halfway_signal.connect(self.pre_download_next_video)
-            self.thread.finished.connect(self.play_next_video)
+            self.thread.finished_signal.connect(self.play_next_video)
             self.thread.start()
+            next_video_path = None
 
 def fetch_video_url(search_term):
     api_url = f"https://www.pornhub.com/webmasters/search?search={search_term}"
@@ -167,12 +151,8 @@ def fetch_video_url(search_term):
 
 def download_video(video_url):
     save_path = os.path.join(os.getcwd(), f"video_{download_index}.mp4")
-
-    # If video with same name exists, delete it
     if os.path.exists(save_path):
         os.remove(save_path)
-        print(f"Deleted existing video: {save_path}")
-
     ydl_opts = {'outtmpl': save_path, 'quiet': True, 'no_warnings': True, 'format': 'worst.2'}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([video_url])
